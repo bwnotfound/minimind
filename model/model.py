@@ -63,6 +63,27 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 
+class CoPE(nn.Module):
+    def __init__(self, max_relative_pos_length, head_dim):
+        super().__init__()
+        self.max_relative_pos_length = max_relative_pos_length
+        self.pos_emb = nn.parameter.Parameter(torch.zeros(1, head_dim, max_relative_pos_length))
+
+    def forward(self, query, attn_logits):
+        # compute positions
+        gates = torch.sigmoid(attn_logits)
+        pos = gates.flip(-1).cumsum(dim=-1).flip(-1)
+        pos = pos.clamp(max=self.max_relative_pos_length - 1)
+        # interpolate from integer positions
+        pos_ceil = pos.ceil().long()
+        pos_floor = pos.floor().long()
+        logits_int = torch.matmul(query, self.pos_emb)
+        logits_ceil = logits_int.gather(-1, pos_ceil)
+        logits_floor = logits_int.gather(-1, pos_floor)
+        w = pos - pos_floor
+        return logits_ceil * w + logits_floor * (1 - w)
+
+
 class Attention(nn.Module):
     def __init__(self, args: LMConfig):
         super().__init__()
@@ -86,8 +107,15 @@ class Attention(nn.Module):
         mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
         mask = torch.triu(mask, diagonal=1)
         self.register_buffer("mask", mask, persistent=False)
+        
+        self.pe_mode = args.pe_mode
+        if self.pe_mode == "cope":
+            self.cope = CoPE(args.max_relative_pos_length, self.head_dim)
+        
+    def forward(self, x: torch.Tensor, kv_cache=False, pos_cis: torch.Tensor=None):
+        if self.pe_mode == "rope":
+            assert pos_cis is not None, "pos_cis is required for rope positional encoding"
 
-    def forward(self, x: torch.Tensor, pos_cis: torch.Tensor, kv_cache=False):
         bsz, seqlen, _ = x.shape
 
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
@@ -96,7 +124,8 @@ class Attention(nn.Module):
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, pos_cis)
+        if self.pe_mode == "rope":
+            xq, xk = apply_rotary_emb(xq, xk, pos_cis)
 
         # 更高效的kv_cache实现
         if kv_cache and self.eval():
@@ -112,13 +141,15 @@ class Attention(nn.Module):
         xk = xk.transpose(1, 2)
         xv = xv.transpose(1, 2)
 
-        if self.flash and seqlen != 1:
+        if self.flash and seqlen != 1 and self.pe_mode != "cope":
             output = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, attn_mask=None,
                                                                       dropout_p=self.dropout if self.training else 0.0,
                                                                       is_causal=True)
         else:
             scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
             scores = scores + self.mask[:, :, :seqlen, :seqlen]  # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            if self.pe_mode == "cope":
+                scores = scores + self.cope(xq, scores)
             scores = F.softmax(scores.float(), dim=-1).type_as(xq)
             scores = self.attn_dropout(scores)
             output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
@@ -301,8 +332,8 @@ class TransformerBlock(nn.Module):
                 dropout=args.dropout,
             )
 
-    def forward(self, x, pos_cis, kv_cache=False):
-        h = x + self.attention(self.attention_norm(x), pos_cis, kv_cache)
+    def forward(self, x, kv_cache=False, pos_cis=None):
+        h = x + self.attention(self.attention_norm(x), kv_cache=kv_cache, pos_cis=pos_cis)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
@@ -327,8 +358,9 @@ class Transformer(PreTrainedModel):
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
         self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
         self.tok_embeddings.weight = self.output.weight
-        pos_cis = precompute_pos_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len)
-        self.register_buffer("pos_cis", pos_cis, persistent=False)
+        if params.pe_mode == "rope":
+            pos_cis = precompute_pos_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len)
+            self.register_buffer("pos_cis", pos_cis, persistent=False)
 
         self.apply(self._init_weights)
 
@@ -361,9 +393,11 @@ class Transformer(PreTrainedModel):
         _bsz, seqlen = tokens.shape
         h = self.tok_embeddings(tokens)
         h = self.dropout(h)
-        pos_cis = self.pos_cis[current_idx:current_idx + seqlen]
+        pos_cis = None
+        if self.params.pe_mode == "rope":
+            pos_cis = self.pos_cis[current_idx:current_idx + seqlen]
         for idx, layer in enumerate(self.layers):
-            h = layer(h, pos_cis, kv_cache)
+            h = layer(h, kv_cache=kv_cache, pos_cis=pos_cis)
 
         h = self.norm(h)
 

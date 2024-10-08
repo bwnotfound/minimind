@@ -17,8 +17,8 @@ eos_token = "</s>"
 def pretrain_process(chunk_size=50000):
     chunk_idx = 0
 
-    with jsonlines.open('./dataset/mobvoi_seq_monkey_general_open_corpus.jsonl') as reader:
-        with open('./dataset/pretrain_data.csv', 'w', newline='', encoding='utf-8') as csvfile:
+    with jsonlines.open(f'{dataset_dir}/mobvoi_seq_monkey_general_open_corpus.jsonl') as reader:
+        with open(f'{dataset_dir}/pretrain_data.csv', 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(['text'])
 
@@ -75,17 +75,17 @@ def sft_process(contain_history=False):
 
         # 创建DataFrame并追加到CSV文件
         df = pd.DataFrame({'history': history_lst, 'q': q_lst, 'a': a_lst})
-        df.to_csv(f'./dataset/{file_name}', mode='a', header=False, index=False, lineterminator='\r\n')
+        df.to_csv(f'{dataset_dir}/{file_name}', mode='a', header=False, index=False, lineterminator='\r\n')
 
     chunk_size = 1000  # 每次处理的记录数
     data = []
 
-    with open(f'./dataset/{file_name}', 'w', encoding='utf-8') as f:
+    with open(f'{dataset_dir}/{file_name}', 'w', encoding='utf-8') as f:
         f.write('history,q,a\n')
 
-    sft_datasets = ['./dataset/sft_data_zh.jsonl']
+    sft_datasets = [f'{dataset_dir}/sft_data_zh.jsonl']
     if not contain_history:
-        sft_datasets = ['./dataset/sft_data_zh.jsonl']
+        sft_datasets = [f'{dataset_dir}/sft_data_zh.jsonl']
 
     for path in sft_datasets:
         with jsonlines.open(path) as reader:
@@ -114,9 +114,9 @@ def rl_process():
     # Dataset
     ################
 
-    dataset_path = ['./dataset/dpo/dpo_zh_demo.json',
-                    './dataset/dpo/train_data.json',
-                    './dataset/dpo/huozi_rlhf_data.json', ]
+    dataset_path = [f'{dataset_dir}/dpo/dpo_zh_demo.json',
+                    f'{dataset_dir}/dpo/train_data.json',
+                    f'{dataset_dir}/dpo/huozi_rlhf_data.json', ]
 
     train_dataset = load_dataset('json', data_files=dataset_path)
 
@@ -130,11 +130,12 @@ def rl_process():
         load_from_cache_file=False,
     )
 
-    output_dataset_path = './dataset/dpo/train_data.json'
+    output_dataset_path = f'{dataset_dir}/dpo/train_data.json'
     ds['train'].to_json(output_dataset_path, force_ascii=False, orient='records', lines=True)
 
 
 if __name__ == "__main__":
+    dataset_dir = "./datasets"
     tokenizer = AutoTokenizer.from_pretrained('./model/minimind_tokenizer', use_fast=False)
     print('tokenizer词表大小：', len(tokenizer))
 

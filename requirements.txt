@@ -26,3 +26,4 @@ jsonlines==4.0.0
 trl==0.8.6
 ujson==5.1.0
 wandb==0.18.3
+tqdm

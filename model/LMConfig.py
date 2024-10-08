@@ -18,6 +18,8 @@ class LMConfig(PretrainedConfig):
             max_seq_len: int = 512,
             dropout: float = 0.0,
             flash_attn: bool = True,
+            pe_mode="rope",
+            max_cope_relative_seq_length=None,
             ####################################################
             # Here are the specific configurations of MOE
             # When use_moe is false, the following is invalid
@@ -43,6 +45,11 @@ class LMConfig(PretrainedConfig):
         self.max_seq_len = max_seq_len
         self.dropout = dropout
         self.flash_attn = flash_attn
+        self.pe_mode = pe_mode
+        assert pe_mode in ['rope', "cope"], f"Unknown positional encoding mode: {pe_mode}. Currently supported pe_mode is ['rope', 'cope']."
+        if max_cope_relative_seq_length is None:
+            max_cope_relative_seq_length = max_seq_len
+        self.max_relative_pos_length = max_cope_relative_seq_length
         ####################################################
         # Here are the specific configurations of MOE
         # When use_moe is false, the following is invalid
